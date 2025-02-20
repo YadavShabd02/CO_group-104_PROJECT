@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # I type and J type done by 2024149 
+# R and B type done by 2024442
+# S type and outputting code done by 2024516
 
 import re
 import sys
 import pandas as pd
-# R and B type done by 2024442
+
 # Instruction set dictionary 
 instr_set = {
     "jal":   ("1101111", None, None),
