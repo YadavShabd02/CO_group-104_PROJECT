@@ -4,7 +4,7 @@
 import re
 import sys
 import pandas as pd
-
+# R and B type done by 2024442
 # Instruction set dictionary 
 instr_set = {
     "jal":   ("1101111", None, None),
