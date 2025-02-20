@@ -1,328 +1,262 @@
 #!/usr/bin/env python3
-import sys
 import re
+import sys
+import pandas as pd
 
-# Helper: Return two's complement binary representation of n in "bits" bits.
-def to_binary(n, bits):
-    if n < 0:
-        n = (1 << bits) + n
-    if n >= (1 << bits) or n < 0:
-        raise ValueError("Immediate {} out of range for {} bits".format(n, bits))
-    return format(n, '0{}b'.format(bits))
-
-# Register mapping as per Table 15 in the project document.
-registers = {
-    "zero": 0,
-    "ra": 1,
-    "sp": 2,
-    "gp": 3,
-    "tp": 4,
-    "t0": 5,
-    "t1": 6,
-    "t2": 7,
-    "s0": 8, "fp": 8,
-    "s1": 9,
-    "a0": 10,
-    "a1": 11,
-    "a2": 12,
-    "a3": 13,
-    "a4": 14,
-    "a5": 15,
-    "a6": 16,
-    "a7": 17,
-    "s2": 18,
-    "s3": 19,
-    "s4": 20,
-    "s5": 21,
-    "s6": 22,
-    "s7": 23,
-    "s8": 24,
-    "s9": 25,
-    "s10": 26,
-    "s11": 27,
-    "t3": 28,
-    "t4": 29,
-    "t5": 30,
-    "t6": 31
+# Instruction set dictionary 
+instr_set = {
+    "jal":   ("1101111", None, None),
+    "lui":   ("0110111", None, None),
+    "auipc": ("0010111", None, None),
+    "beq":   ("1100011", "000", None),
+    "bne":   ("1100011", "001", None),
+    "blt":   ("1100011", "100", None),
+    "bge":   ("1100011", "101", None),
+    "bltu":  ("1100011", "110", None),
+    "bgeu":  ("1100011", "111", None),
+    "sw":    ("0100011", "010", None),
+    "lw":    ("0000011", "010", None),
+    "addi":  ("0010011", "000", None),
+    "sltiu": ("0010011", "011", None),
+    "jalr":  ("1100111", "000", None),
+    "add":   ("0110011", "000", "0000000"),
+    "sub":   ("0110011", "000", "0100000"),
+    "sll":   ("0110011", "001", "0000000"),
+    "slt":   ("0110011", "010", "0000000"),
+    "sltu":  ("0110011", "011", "0000000"),
+    "xor":   ("0110011", "100", "0000000"),
+    "srl":   ("0110011", "101", "0000000"),
+    "or":    ("0110011", "110", "0000000"),
+    "and":   ("0110011", "111", "0000000")
 }
 
-# Encoding information for each instruction type (based on Tables 3–11).
-R_instructions = {
-    "add": {"funct7": "0000000", "funct3": "000", "opcode": "0110011"},
-    "sub": {"funct7": "0100000", "funct3": "000", "opcode": "0110011"},
-    "slt": {"funct7": "0000000", "funct3": "010", "opcode": "0110011"},
-    "srl": {"funct7": "0000000", "funct3": "101", "opcode": "0110011"},
-    "or":  {"funct7": "0000000", "funct3": "110", "opcode": "0110011"},
-    "and": {"funct7": "0000000", "funct3": "111", "opcode": "0110011"}
+# Register mapping (using binary string representations)
+reg_bin = {
+    "zero": "00000", "ra": "00001", "sp": "00010", "gp": "00011", "tp": "00100",
+    "t0": "00101", "t1": "00110", "t2": "00111", "s0": "01000", "s1": "01001",
+    "a0": "01010", "a1": "01011", "a2": "01100", "a3": "01101", "a4": "01110",
+    "a5": "01111", "a6": "10000", "a7": "10001", "s2": "10010", "s3": "10011",
+    "s4": "10100", "s5": "10101", "s6": "10110", "s7": "10111", "s8": "11000",
+    "s9": "11001", "s10": "11010", "s11": "11011", "t3": "11100", "t4": "11101",
+    "t5": "11110", "t6": "11111"
 }
 
-I_instructions = {
-    "addi": {"opcode": "0010011", "funct3": "000"},
-    "lw":   {"opcode": "0000011", "funct3": "010"},
-    "jalr": {"opcode": "1100111", "funct3": "000"}
-}
-
-S_instructions = {
-    "sw": {"opcode": "0100011", "funct3": "010"}
-}
-
-B_instructions = {
-    "beq": {"opcode": "1100011", "funct3": "000"},
-    "bne": {"opcode": "1100011", "funct3": "001"},
-    "blt": {"opcode": "1100011", "funct3": "100"}
-}
-
-J_instructions = {
-    "jal": {"opcode": "1101111"}
-}
-
-# Parse a register name; throw an error if invalid.
-def parse_register(reg_str, line_num):
-    reg_str = reg_str.strip()
-    if reg_str in registers:
-        return registers[reg_str]
-    else:
-        raise ValueError("Line {}: Invalid register name '{}'".format(line_num, reg_str))
-
-# Parse an immediate (in decimal or hexadecimal).
-def parse_immediate(imm_str, bits, line_num):
-    imm_str = imm_str.strip()
-    try:
-        if imm_str.startswith("0x") or imm_str.startswith("-0x"):
-            return int(imm_str, 16)
-        else:
-            return int(imm_str, 10)
-    except:
-        raise ValueError("Line {}: Invalid immediate '{}'".format(line_num, imm_str))
-
-# R-type encoding: {funct7}{rs2}{rs1}{funct3}{rd}{opcode}
-def encode_R_type(mnemonic, rd, rs1, rs2, line_num):
-    info = R_instructions[mnemonic]
-    rd_bin = to_binary(rd, 5)
-    rs1_bin = to_binary(rs1, 5)
-    rs2_bin = to_binary(rs2, 5)
-    return info["funct7"] + rs2_bin + rs1_bin + info["funct3"] + rd_bin + info["opcode"]
-
-# I-type encoding: {imm[11:0]}{rs1}{funct3}{rd}{opcode}
-def encode_I_type(mnemonic, rd, rs1, immediate, line_num):
-    info = I_instructions[mnemonic]
-    try:
-        imm_bin = to_binary(immediate, 12)
-    except Exception:
-        raise ValueError("Line {}: Immediate {} out of range for 12 bits".format(line_num, immediate))
-    return imm_bin + to_binary(rs1, 5) + info["funct3"] + to_binary(rd, 5) + info["opcode"]
-
-# S-type encoding: {imm[11:5]}{rs2}{rs1}{funct3}{imm[4:0]}{opcode}
-def encode_S_type(mnemonic, rs1, rs2, immediate, line_num):
-    info = S_instructions[mnemonic]
-    try:
-        imm_bin = to_binary(immediate, 12)
-    except Exception:
-        raise ValueError("Line {}: Immediate {} out of range for 12 bits".format(line_num, immediate))
-    imm_high = imm_bin[:7]  # bits 11-5
-    imm_low = imm_bin[7:]   # bits 4-0
-    return imm_high + to_binary(rs2, 5) + to_binary(rs1, 5) + info["funct3"] + imm_low + info["opcode"]
-
-# B-type encoding (branch): {imm[12], imm[10:5]}{rs2}{rs1}{funct3}{imm[4:1], imm[11]}{opcode}
-def encode_B_type(mnemonic, rs1, rs2, immediate, line_num):
-    info = B_instructions[mnemonic]
-    # For branch instructions, require that the immediate is even.
-    if immediate % 2 != 0:
-        raise ValueError("Line {}: Branch immediate {} is not aligned".format(line_num, immediate))
-    # Standard RISC-V branch immediates are encoded after shifting right by 1.
-    imm_val = immediate >> 1
-    try:
-        imm_bin = to_binary(imm_val, 12)
-    except Exception:
-        raise ValueError("Line {}: Immediate {} out of range for 12 bits".format(line_num, immediate))
-    bit12    = imm_bin[0]      # this will be placed at bit 31
-    bits10_5 = imm_bin[1:7]    # placed in bits 30-25
-    bits4_1  = imm_bin[7:11]   # placed in bits 11-8
-    bit11    = imm_bin[11]     # placed at bit 7
-    return bit12 + bits10_5 + to_binary(rs2, 5) + to_binary(rs1, 5) + info["funct3"] + bits4_1 + bit11 + info["opcode"]
-
-# J-type encoding: {imm[20], imm[10:1], imm[11], imm[19:12]}{rd}{opcode}
-def encode_J_type(mnemonic, rd, immediate, line_num):
-    info = J_instructions[mnemonic]
-    # For JAL, require immediate alignment.
-    if immediate % 2 != 0:
-        raise ValueError("Line {}: JAL immediate {} is not aligned".format(line_num, immediate))
-    try:
-        imm_bin = to_binary(immediate, 20)
-    except Exception:
-        raise ValueError("Line {}: Immediate {} out of range for 20 bits".format(line_num, immediate))
-    # Rearrange bits as per Table 11: imm[20|10:1|11|19:12]
-    imm_20    = imm_bin[0]       # most significant bit
-    imm_19_12 = imm_bin[1:9]     # next 8 bits
-    imm_11    = imm_bin[9]       # next 1 bit
-    imm_10_1  = imm_bin[10:]     # remaining 10 bits
-    return imm_20 + imm_10_1 + imm_11 + imm_19_12 + to_binary(rd, 5) + info["opcode"]
-
-# Process a single instruction (without any label) and return its 32-bit binary string.
-def process_instruction(instr, current_address, labels, line_num):
-    instr = instr.strip()
-    if not instr:
-        return None
-    # Split into mnemonic and operand string.
-    parts = instr.split(None, 1)
-    mnemonic = parts[0]
-    operands = parts[1] if len(parts) > 1 else ""
-    # Split operands (by commas) and strip spaces.
-    operands_list = [op.strip() for op in operands.split(",") if op.strip() != ""]
-    
-    if mnemonic in R_instructions:
-        # Expected format: opcode rd, rs1, rs2
-        if len(operands_list) != 3:
-            raise ValueError("Line {}: R-type instruction '{}' requires 3 operands".format(line_num, mnemonic))
-        rd  = parse_register(operands_list[0], line_num)
-        rs1 = parse_register(operands_list[1], line_num)
-        rs2 = parse_register(operands_list[2], line_num)
-        return encode_R_type(mnemonic, rd, rs1, rs2, line_num)
-    elif mnemonic in I_instructions:
-        if mnemonic == "lw":
-            # Format: lw rd, offset(rs1)
-            if len(operands_list) != 2:
-                raise ValueError("Line {}: lw instruction requires 2 operands".format(line_num))
-            rd = parse_register(operands_list[0], line_num)
-            m = re.match(r"(-?\w+)\((\w+)\)", operands_list[1])
-            if not m:
-                raise ValueError("Line {}: Invalid format for lw operand '{}'".format(line_num, operands_list[1]))
-            imm_str, rs1_str = m.groups()
-            if imm_str in labels:
-                immediate = labels[imm_str] - current_address
-            else:
-                immediate = parse_immediate(imm_str, 12, line_num)
-            rs1 = parse_register(rs1_str, line_num)
-            return encode_I_type(mnemonic, rd, rs1, immediate, line_num)
-        elif mnemonic == "jalr":
-            # Format: jalr rd, rs1, immediate
-            if len(operands_list) != 3:
-                raise ValueError("Line {}: jalr instruction requires 3 operands".format(line_num))
-            rd  = parse_register(operands_list[0], line_num)
-            rs1 = parse_register(operands_list[1], line_num)
-            if operands_list[2] in labels:
-                immediate = labels[operands_list[2]] - current_address
-            else:
-                immediate = parse_immediate(operands_list[2], 12, line_num)
-            return encode_I_type(mnemonic, rd, rs1, immediate, line_num)
-        else:  # addi
-            # Format: addi rd, rs1, immediate
-            if len(operands_list) != 3:
-                raise ValueError("Line {}: addi instruction requires 3 operands".format(line_num))
-            rd  = parse_register(operands_list[0], line_num)
-            rs1 = parse_register(operands_list[1], line_num)
-            if operands_list[2] in labels:
-                immediate = labels[operands_list[2]] - current_address
-            else:
-                immediate = parse_immediate(operands_list[2], 12, line_num)
-            return encode_I_type(mnemonic, rd, rs1, immediate, line_num)
-    elif mnemonic in S_instructions:
-        # Format: sw rs2, offset(rs1)
-        if len(operands_list) != 2:
-            raise ValueError("Line {}: sw instruction requires 2 operands".format(line_num))
-        rs2 = parse_register(operands_list[0], line_num)
-        m = re.match(r"(-?\w+)\((\w+)\)", operands_list[1])
-        if not m:
-            raise ValueError("Line {}: Invalid format for sw operand '{}'".format(line_num, operands_list[1]))
-        imm_str, rs1_str = m.groups()
-        if imm_str in labels:
-            immediate = labels[imm_str] - current_address
-        else:
-            immediate = parse_immediate(imm_str, 12, line_num)
-        rs1 = parse_register(rs1_str, line_num)
-        return encode_S_type(mnemonic, rs1, rs2, immediate, line_num)
-    elif mnemonic in B_instructions:
-        # Format: beq/bne/blt rs1, rs2, immediate/label
-        if len(operands_list) != 3:
-            raise ValueError("Line {}: Branch instruction '{}' requires 3 operands".format(line_num, mnemonic))
-        rs1 = parse_register(operands_list[0], line_num)
-        rs2 = parse_register(operands_list[1], line_num)
-        if operands_list[2] in labels:
-            immediate = labels[operands_list[2]] - current_address
-        else:
-            immediate = parse_immediate(operands_list[2], 12, line_num)
-        return encode_B_type(mnemonic, rs1, rs2, immediate, line_num)
-    elif mnemonic in J_instructions:
-        # Format: jal rd, immediate/label
-        if len(operands_list) != 2:
-            raise ValueError("Line {}: jal instruction requires 2 operands".format(line_num))
-        rd = parse_register(operands_list[0], line_num)
-        if operands_list[1] in labels:
-            immediate = labels[operands_list[1]] - current_address
-        else:
-            immediate = parse_immediate(operands_list[1], 20, line_num)
-        return encode_J_type(mnemonic, rd, immediate, line_num)
-    else:
-        raise ValueError("Line {}: Unknown instruction '{}'".format(line_num, mnemonic))
-
-def main():
-    if len(sys.argv) != 3:
-        print("Usage: assembler.py <input_file> <output_file>")
-        sys.exit(1)
-    input_file = sys.argv[1]
-    output_file = sys.argv[2]
-    try:
-        with open(input_file, "r") as f:
-            lines = f.readlines()
-    except Exception as e:
-        print("Error reading input file:", e)
-        sys.exit(1)
-    # First pass: collect labels and assign addresses (each instruction is 4 bytes)
-    labels = {}
-    instructions = []  # Each entry is a tuple: (instruction_text, line_number, address)
-    current_address = 0
-    for idx, line in enumerate(lines):
-        line_stripped = line.strip()
-        if line_stripped == "":
-            continue
-        if ":" in line_stripped:
-            # A label line (or label plus instruction) e.g., "loop: beq ra,sp,end"
-            parts = line_stripped.split(":", 1)
-            label_name = parts[0].strip()
-            if not label_name or not label_name[0].isalpha():
-                print("Line {}: Invalid label '{}'".format(idx+1, label_name))
-                sys.exit(1)
-            labels[label_name] = current_address
-            rest = parts[1].strip()
-            if rest != "":
-                instructions.append((rest, idx+1, current_address))
-                current_address += 4
-        else:
-            instructions.append((line_stripped, idx+1, current_address))
-            current_address += 4
-
-    if len(instructions) == 0:
-        print("Error: No instructions found.")
-        sys.exit(1)
-    # Ensure that the last instruction is the Virtual Halt: "beq zero,zero,0"
-    last_instr_text, last_line, _ = instructions[-1]
-    if not last_instr_text.startswith("beq"):
-        print("Line {}: Last instruction must be Virtual Halt (beq zero,zero,0)".format(last_line))
-        sys.exit(1)
-    parts = last_instr_text.split(None, 1)
-    if len(parts) < 2 or parts[1].replace(" ", "") != "zero,zero,0":
-        print("Line {}: Last instruction must be Virtual Halt (beq zero,zero,0)".format(last_line))
-        sys.exit(1)
-    
-    # Second pass: process each instruction and encode.
-    binary_instructions = []
-    for instr_text, line_num, addr in instructions:
+class RVAssembler:
+    def __init__(self, filename):
+        # Read all non-empty lines from the input file
         try:
-            encoded = process_instruction(instr_text, addr, labels, line_num)
-            if encoded is not None:
-                binary_instructions.append(encoded)
+            with open(filename, "r") as f:
+                self.raw_lines = [line.strip() for line in f if line.strip()]
         except Exception as e:
-            print(e)
-            sys.exit(1)
-    
-    # Write the binary code to the output file (each line is a 32-bit binary number)
-    try:
-        with open(output_file, "w") as f:
-            for bin_instr in binary_instructions:
-                f.write(bin_instr + "\n")
-    except Exception as e:
-        print("Error writing output file:", e)
-        sys.exit(1)
+            sys.exit(f"Error reading file: {e}")
+        
+        # Process labels and instructions 
+        self.labels = {}
+        self.instr_lines = []  # Instructions after label removal
+        current_addr = 0
+        for idx, line in enumerate(self.raw_lines):
+            if ':' in line:
+                # Split into label and (optional) instruction part
+                label_part, remainder = line.split(":", 1)
+                label = label_part.strip()
+                if not label or not label[0].isalpha():
+                    sys.exit(f"Invalid label format at line {idx+1}")
+                self.labels[label] = current_addr
+                if remainder.strip():
+                    self.instr_lines.append(remainder.strip())
+                    current_addr += 4
+            else:
+                self.instr_lines.append(line)
+                current_addr += 4
+        
+        if not self.instr_lines:
+            sys.exit("No instructions found in the source file.")
+        
+        # Break instructions into opcode and argument parts
+        self.asm_parts = []
+        for line in self.instr_lines:
+            parts = line.split(None, 1)
+            if len(parts) < 2:
+                sys.exit(f"Invalid instruction format: {line}")
+            self.asm_parts.append(parts)
+        
+        # Debug: Display instructions using a DataFrame 
+        df = pd.DataFrame(self.asm_parts, columns=["opcode", "args"])
+        print(df)
+        
+        # Enforce that the last instruction is the virtual halt: "beq zero,zero,0"
+        last_op, last_args = self.asm_parts[-1]
+        if last_op != "beq":
+            sys.exit("Error: Last instruction must be 'beq zero,zero,0'")
+        # Remove all spaces and check
+        if "".join(last_args.split()) != "zero,zero,0":
+            sys.exit("Error: Last instruction must be 'beq zero,zero,0'")
+
+    def to_binary(self, n, bits):
+        # Return two's complement binary representation of n with the given number of bits.
+        if n < 0:
+            n = (1 << bits) + n
+        if n < 0 or n >= (1 << bits):
+            sys.exit(f"Immediate {n} out of range for {bits} bits")
+        return format(n, f'0{bits}b')
+
+    def assemble_instruction(self, parts, curr_addr):
+        opcode = parts[0]
+        if opcode not in instr_set:
+            sys.exit(f"Unknown instruction '{opcode}' at address {curr_addr}")
+        op_info = instr_set[opcode]
+        # Split the argument string using commas and parentheses
+        args = [arg.strip() for arg in re.split(r'[,\(\)]', parts[1]) if arg.strip()]
+        
+        # J-type: jal
+        if opcode == "jal":
+            if len(args) != 2:
+                sys.exit(f"Invalid number of arguments for jal at address {curr_addr}")
+            rd = reg_bin.get(args[0])
+            if rd is None:
+                sys.exit(f"Invalid register {args[0]} at address {curr_addr}")
+            try:
+                imm_val = int(args[1])
+            except ValueError:
+                if args[1] in self.labels:
+                    imm_val = self.labels[args[1]] - curr_addr
+                else:
+                    sys.exit(f"Invalid immediate/label '{args[1]}' at address {curr_addr}")
+            if imm_val >= 2**20 or imm_val < -2**20:
+                sys.exit(f"Immediate value out of range for jal at address {curr_addr}")
+            imm = '{:021b}'.format(imm_val if imm_val >= 0 else (2**21 + imm_val))
+            # Rearrangement: imm[20] | imm[10:1] | imm[11] | imm[19:12]
+            return imm[0] + imm[10:20] + imm[9] + imm[1:9] + rd + op_info[0]
+        
+        # I-type instructions: lw, jalr, addi
+        elif opcode in ["lw", "jalr", "addi"]:
+            if opcode == "lw":
+                if len(args) != 2:
+                    sys.exit(f"Invalid number of arguments for lw at address {curr_addr}")
+                rd = reg_bin.get(args[0])
+                # Expect format like offset(reg)
+                match = re.match(r"(-?\w+)\((\w+)\)", parts[1].split(",")[1].strip())
+                if not match:
+                    sys.exit(f"Invalid lw format at address {curr_addr}")
+                imm_str, rs1_str = match.groups()
+                try:
+                    imm_val = int(imm_str)
+                except ValueError:
+                    if imm_str in self.labels:
+                        imm_val = self.labels[imm_str] - curr_addr
+                    else:
+                        sys.exit(f"Invalid immediate/label '{imm_str}' at address {curr_addr}")
+                rs1 = reg_bin.get(rs1_str)
+                if rd is None or rs1 is None:
+                    sys.exit(f"Invalid register in lw at address {curr_addr}")
+                return self.to_binary(imm_val, 12) + rs1 + op_info[1] + rd + op_info[0]
+            elif opcode == "jalr":
+                if len(args) != 3:
+                    sys.exit(f"Invalid number of arguments for jalr at address {curr_addr}")
+                rd = reg_bin.get(args[0])
+                rs1 = reg_bin.get(args[1])
+                try:
+                    imm_val = int(args[2])
+                except ValueError:
+                    if args[2] in self.labels:
+                        imm_val = self.labels[args[2]] - curr_addr
+                    else:
+                        sys.exit(f"Invalid immediate/label '{args[2]}' at address {curr_addr}")
+                if rd is None or rs1 is None:
+                    sys.exit(f"Invalid register in jalr at address {curr_addr}")
+                return self.to_binary(imm_val, 12) + rs1 + op_info[1] + rd + op_info[0]
+            else:  # addi
+                if len(args) != 3:
+                    sys.exit(f"Invalid number of arguments for addi at address {curr_addr}")
+                rd = reg_bin.get(args[0])
+                rs1 = reg_bin.get(args[1])
+                try:
+                    imm_val = int(args[2])
+                except ValueError:
+                    if args[2] in self.labels:
+                        imm_val = self.labels[args[2]] - curr_addr
+                    else:
+                        sys.exit(f"Invalid immediate/label '{args[2]}' at address {curr_addr}")
+                if rd is None or rs1 is None:
+                    sys.exit(f"Invalid register in addi at address {curr_addr}")
+                return self.to_binary(imm_val, 12) + rs1 + op_info[1] + rd + op_info[0]
+        
+        # B-type instructions: beq, bne, blt, etc.
+        elif opcode in ["beq", "bne", "blt", "bge", "bltu", "bgeu"]:
+            if len(args) != 3:
+                sys.exit(f"Invalid number of arguments for {opcode} at address {curr_addr}")
+            rs1 = reg_bin.get(args[0])
+            rs2 = reg_bin.get(args[1])
+            try:
+                imm_val = int(args[2])
+            except ValueError:
+                if args[2] in self.labels:
+                    imm_val = self.labels[args[2]] - curr_addr
+                else:
+                    sys.exit(f"Invalid immediate/label '{args[2]}' at address {curr_addr}")
+            if rs1 is None or rs2 is None:
+                sys.exit(f"Invalid register in {opcode} at address {curr_addr}")
+            if imm_val >= 2**12 or imm_val < -2**12:
+                sys.exit(f"Immediate out of range for {opcode} at address {curr_addr}")
+            imm = '{:013b}'.format(imm_val if imm_val >= 0 else (2**13 + imm_val))
+            # Branch format: imm[12] | imm[10:5] | rs2 | rs1 | funct3 | imm[4:1] | imm[11] | opcode
+            return imm[0] + imm[2:8] + rs2 + rs1 + op_info[1] + imm[8:12] + imm[1] + op_info[0]
+        
+        # S-type: sw
+        elif opcode == "sw":
+            if len(args) != 2:
+                sys.exit(f"Invalid number of arguments for sw at address {curr_addr}")
+            rs2 = reg_bin.get(args[0])
+            match = re.match(r"(-?\w+)\((\w+)\)", parts[1].split(",")[1].strip())
+            if not match:
+                sys.exit(f"Invalid sw format at address {curr_addr}")
+            imm_str, rs1_str = match.groups()
+            try:
+                imm_val = int(imm_str)
+            except ValueError:
+                if imm_str in self.labels:
+                    imm_val = self.labels[imm_str] - curr_addr
+                else:
+                    sys.exit(f"Invalid immediate/label '{imm_str}' at address {curr_addr}")
+            rs1 = reg_bin.get(rs1_str)
+            if rs1 is None or rs2 is None:
+                sys.exit(f"Invalid register in sw at address {curr_addr}")
+            imm_bin = '{:012b}'.format(imm_val if imm_val >= 0 else (2**12 + imm_val))
+            return imm_bin[:7] + rs2 + rs1 + op_info[1] + imm_bin[7:] + op_info[0]
+        
+        # R-type instructions: add, sub, sll, etc.
+        elif opcode in ["add", "sub", "sll", "slt", "sltu", "xor", "srl", "or", "and"]:
+            if len(args) != 3:
+                sys.exit(f"Invalid number of arguments for {opcode} at address {curr_addr}")
+            rd = reg_bin.get(args[0])
+            rs1 = reg_bin.get(args[1])
+            rs2 = reg_bin.get(args[2])
+            if rd is None or rs1 is None or rs2 is None:
+                sys.exit(f"Invalid register in {opcode} at address {curr_addr}")
+            return op_info[2] + rs2 + rs1 + op_info[1] + rd + op_info[0]
+        else:
+            sys.exit(f"Unknown instruction '{opcode}' at address {curr_addr}")
+
+    def assemble(self):
+        machine_codes = []
+        curr_addr = 0
+        for part in self.asm_parts:
+            code = self.assemble_instruction(part, curr_addr)
+            machine_codes.append(code)
+            curr_addr += 4
+        return machine_codes
+
+    def write_output(self, out_filename):
+        codes = self.assemble()
+        try:
+            with open(out_filename, "w") as f:
+                for code in codes:
+                    f.write(code + "\n")
+        except Exception as e:
+            sys.exit(f"Error writing output file: {e}")
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) != 3:
+        sys.exit("Usage: rv_assembler.py <input_file> <output_file>")
+    assembler = RVAssembler(sys.argv[1])
+    assembler.write_output(sys.argv[2])
