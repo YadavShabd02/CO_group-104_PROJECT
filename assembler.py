@@ -2,6 +2,7 @@
 # I type and J type done by 2024149 
 # R and B type done by 2024442
 # S type and outputting code done by 2024516
+# dictionaries and class done by 2024244
 
 import re
 import sys
